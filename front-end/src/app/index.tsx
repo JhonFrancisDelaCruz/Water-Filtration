@@ -5,6 +5,7 @@ import { BackHandler, StyleSheet, Text, View } from 'react-native';
 import BottomNav from '../components/BottomNav';
 import HistoryScreen from '../screens/HistoryScreen';
 import HomeScreen from '../screens/HomeScreen';
+import AlertsScreen from '../screens/AlertsScreen';
 import MonitorScreen from '../screens/MonitorScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import WifiConfigScreen from '../screens/WifiConfigScreen';
@@ -26,7 +27,7 @@ export default function Index() {
     return () => sub.remove();
   }, [wifiOpen]);
 
-  const darkContent = tab === 'history' || tab === 'settings';
+  const darkContent = tab === 'history' || tab === 'alerts' || tab === 'settings';
 
   return (
     <View style={{ flex: 1, backgroundColor: '#EEF4FA' }}>
@@ -38,11 +39,7 @@ export default function Index() {
       {tab === 'monitor' && <MonitorScreen />}
       {tab === 'history' && <HistoryScreen />}
       {tab === 'settings' && <SettingsScreen onOpenWifi={() => setWifiOpen(true)} />}
-      {tab === 'alerts' && (
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <Text style={{ color: '#6B7280' }}>Coming soon</Text>
-        </View>
-      )}
+      {tab === 'alerts' && <AlertsScreen />}
 
       {wifiOpen ? (
         <View style={StyleSheet.absoluteFill}>
