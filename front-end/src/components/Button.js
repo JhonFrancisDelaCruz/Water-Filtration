@@ -1,12 +1,14 @@
 import React from 'react';
 import { Pressable, Text, StyleSheet } from 'react-native';
 import Icon from './Icon';
-import { colors } from '../constants/theme';
+import { colors, getColors, useTheme } from '../constants/theme';
 
 // variant: 'primary' (filled blue) | 'ghost' (outlined)
 export default function Button({ title, icon, variant = 'primary', onPress, disabled, style, height = 48 }) {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
   const primary = variant === 'primary';
-  const fg = primary ? '#fff' : colors.link;
+  const fg = primary ? '#fff' : palette.link;
   return (
     <Pressable
       onPress={onPress}
@@ -16,7 +18,7 @@ export default function Button({ title, icon, variant = 'primary', onPress, disa
       style={({ pressed }) => [
         styles.base,
         { height },
-        primary ? styles.primary : styles.ghost,
+        primary ? [styles.primary, { backgroundColor: palette.buttonBg }] : [styles.ghost, { backgroundColor: palette.card, borderColor: palette.border }],
         disabled && styles.disabled,
         pressed && !disabled && { opacity: 0.85 },
         style,

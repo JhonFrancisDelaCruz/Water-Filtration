@@ -6,15 +6,9 @@ import Button from '../components/Button';
 import Icon from '../components/Icon';
 import StatusPill from '../components/StatusPill';
 import { TOP } from '../components/Header';
-import { colors } from '../constants/theme';
-
-// Placeholder device info for the UI. Replace with real status from your device/service.
-const DEFAULT_DEVICE = {
-  name: 'ESP32-S3',
-  online: true,
-  ssid: 'HomeNet_2.4G',
-  wifiConnected: true,
-};
+import { colors, getColors, useTheme } from '../constants/theme';
+import { useAquasense } from '../services/useAquasense';
+import { isBackendConfigured } from '../services/supabase';
 
 const NOTIFICATIONS = [
   { key: 'turbidity', label: 'High turbidity alerts', sub: 'When readings pass the warning level' },
@@ -23,51 +17,55 @@ const NOTIFICATIONS = [
   { key: 'restored', label: 'Normal condition restored', sub: 'When water returns to normal' },
 ];
 
-export default function SettingsScreen({ device = DEFAULT_DEVICE, onOpenWifi }) {
+export default function SettingsScreen({ onOpenWifi }) {
+  const { device, error } = useAquasense();
   const [alerts, setAlerts] = useState({ turbidity: true, disconnected: true, sensor: true, restored: false });
-  const [theme, setTheme] = useState('light'); // dark mode is not implemented yet
+  const { dark, setDark } = useTheme();
+  const palette = getColors(dark);
 
   const toggle = (key) => setAlerts((a) => ({ ...a, [key]: !a[key] }));
 
   return (
     <ScrollView
-      style={styles.screen}
+      style={[styles.screen, { backgroundColor: palette.surface }]}
       contentContainerStyle={[styles.content, { paddingTop: TOP + 28 }]}
       showsVerticalScrollIndicator={false}
     >
-      <Text style={styles.title}>Settings</Text>
-      <Text style={styles.subtitle}>Manage your app and device preferences</Text>
-
-      <Card title="Account" icon="user" style={styles.card}>
-        <Row label="Profile information" chevron onPress={() => {}} />
-        <Row label="Edit profile" chevron onPress={() => {}} />
-        <Row label="Change password" chevron onPress={() => {}} />
-      </Card>
+      <Text style={[styles.title, { color: palette.textStrong }]}>Settings</Text>
+      <Text style={[styles.subtitle, { color: palette.mutedText }]}>Manage your app and device preferences</Text>
 
       <Card title="Monitoring Settings" icon="sliders" style={styles.card}>
-        <Row label="Turbidity warning threshold" sub="Alert when readings pass this level" right={<ValueText>10 NTU</ValueText>} onPress={() => {}} />
-        <Row label="Critical threshold" sub="Urgent alert level" right={<ValueText>25 NTU</ValueText>} onPress={() => {}} />
-        <Row label="Reading update interval" sub="How often the ESP32-S3 reports" right={<ValueText>5 sec</ValueText>} onPress={() => {}} />
+        <Row label="Measurement unit" sub="Raw ADC counts (not NTU)" right={<ValueText>0–4095</ValueText>} />
+        <Row label="Water status limits" sub="Set in firmware after calibration" right={<ValueText>Not calibrated</ValueText>} />
       </Card>
 
       <Card title="Device & Connectivity" icon="cpu" style={[styles.card, { paddingBottom: 16 }]}>
-        <Row label="Connected device" right={<ValueText>{device.name}</ValueText>} />
+        <Row label="Connected device" right={<ValueText>{device?.device_name || 'Aquasense ESP32-S3'}</ValueText>} />
         <Row
           label="Device status"
-          right={<StatusPill text={device.online ? 'Connected' : 'Disconnected'} tone={device.online ? 'green' : 'red'} />}
+          right={<StatusPill text={device?.is_online ? 'Online' : 'Offline'} tone={device?.is_online ? 'green' : 'red'} />}
         />
-        <Row label="Wi-Fi network (SSID)" right={<ValueText>{device.ssid || 'Not set'}</ValueText>} />
+        <Row label="Last server contact" right={<ValueText>{device?.last_seen ? new Date(device.last_seen).toLocaleString() : 'Never'}</ValueText>} />
+        <Row label="Device record" right={<ValueText>{device?.id ? `${device.id.slice(0, 8)}…` : 'Not found'}</ValueText>} />
         <Row
-          label="Wi-Fi connection"
-          right={<StatusPill text={device.wifiConnected ? 'Connected' : 'Disconnected'} tone={device.wifiConnected ? 'green' : 'red'} />}
+          label="Cloud access"
+          right={<StatusPill text={device?.is_online ? 'Receiving data' : 'No recent data'} tone={device?.is_online ? 'green' : 'red'} />}
         />
+        {(error || !isBackendConfigured) ? <Text style={[styles.note, { color: palette.mutedText }]}>{error || 'Set the Supabase URL, anon key, and device row UUID in front-end/.env.'}</Text> : null}
         <View style={styles.buttons}>
           <Button title="Change Wi-Fi Connection" icon="wifi" onPress={onOpenWifi} />
           <Button title="Configure Device via Bluetooth" icon="bluetooth" variant="ghost" onPress={onOpenWifi} />
         </View>
-        <Text style={styles.note}>
+        <Text style={[styles.note, { color: palette.mutedText }]}>
           Bluetooth is only used to send new Wi-Fi details to your ESP32-S3. Sensor data always travels over Wi-Fi.
         </Text>
+      </Card>
+
+      <Card title="Troubleshooting" icon="info" style={styles.card}>
+        <Text style={[styles.note, { color: palette.mutedText }]}>• Offline: check USB power, router range, and the 2.4 GHz Wi-Fi credentials in BLE setup.</Text>
+        <Text style={[styles.note, { color: palette.mutedText }]}>• No readings: check sensor wiring, calibration, and Serial Monitor logs at 115200 baud.</Text>
+        <Text style={[styles.note, { color: palette.mutedText }]}>• BLE setup fails: enable Bluetooth permissions, keep the ESP32 powered, and use the Aquasense development build.</Text>
+        <Text style={[styles.note, { color: palette.mutedText }]}>• OLED blank: confirm its I²C address and GPIO assignments against your wiring.</Text>
       </Card>
 
       <Card title="Notifications" icon="bell" style={styles.card}>
@@ -95,11 +93,11 @@ export default function SettingsScreen({ device = DEFAULT_DEVICE, onOpenWifi }) 
             { key: 'light', label: 'Light mode', icon: 'sun' },
             { key: 'dark', label: 'Dark mode', icon: 'moon' },
           ].map((o) => {
-            const on = theme === o.key;
+            const on = dark === (o.key === 'dark');
             return (
-              <Pressable key={o.key} onPress={() => setTheme(o.key)} style={[styles.segBtn, on && styles.segOn]}>
-                <Icon name={o.icon} size={16} color={on ? colors.link : colors.mutedText} />
-                <Text style={[styles.segText, on && { color: colors.link }]}>{o.label}</Text>
+              <Pressable key={o.key} onPress={() => setDark(o.key === 'dark')} style={[styles.segBtn, on && styles.segOn, on && { backgroundColor: palette.card }]}>
+                <Icon name={o.icon} size={16} color={on ? palette.link : palette.mutedText} />
+                <Text style={[styles.segText, { color: on ? palette.link : palette.mutedText }]}>{o.label}</Text>
               </Pressable>
             );
           })}
@@ -108,7 +106,7 @@ export default function SettingsScreen({ device = DEFAULT_DEVICE, onOpenWifi }) 
 
       <Card title="About" icon="info" style={styles.card}>
         <Row label="App version" right={<ValueText bold={false}>1.0.0</ValueText>} />
-        <Row label="About AquaMonitor" chevron onPress={() => {}} />
+        <Row label="Water sensor" right={<ValueText>Turbidity only</ValueText>} />
       </Card>
     </ScrollView>
   );

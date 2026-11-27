@@ -1,16 +1,18 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import Icon from './Icon';
-import { colors } from '../constants/theme';
+import { colors, getColors, useTheme } from '../constants/theme';
 
 // A settings row: label (+ optional sub text) on the left, anything on the right.
 export default function Row({ label, sub, right, chevron = false, onPress }) {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
   const Wrapper = onPress ? Pressable : View;
   return (
-    <Wrapper onPress={onPress} style={[styles.row, sub && styles.tall]}>
+    <Wrapper onPress={onPress} style={[styles.row, sub && styles.tall, { borderTopColor: palette.divider }]}>
       <View style={styles.left}>
-        <Text style={styles.label}>{label}</Text>
-        {sub ? <Text style={styles.sub}>{sub}</Text> : null}
+        <Text style={[styles.label, { color: palette.textStrong }]}>{label}</Text>
+        {sub ? <Text style={[styles.sub, { color: palette.mutedText }]}>{sub}</Text> : null}
       </View>
       {right}
       {chevron ? <Icon name="chevronRight" size={18} color="#94A3B8" /> : null}
@@ -19,7 +21,9 @@ export default function Row({ label, sub, right, chevron = false, onPress }) {
 }
 
 export function ValueText({ children, bold = true }) {
-  return <Text style={bold ? styles.valueBold : styles.value}>{children}</Text>;
+  const { dark } = useTheme();
+  const palette = getColors(dark);
+  return <Text style={[bold ? styles.valueBold : styles.value, { color: bold ? palette.link : palette.mutedText }]}>{children}</Text>;
 }
 
 const styles = StyleSheet.create({

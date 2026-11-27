@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import Icon from './Icon';
-import { colors } from '../constants/theme';
+import { getColors, useTheme } from '../constants/theme';
 
 const ITEMS = [
   { key: 'home', label: 'Home', icon: 'home' },
@@ -15,8 +15,10 @@ const ITEMS = [
  * @param {{ active?: 'home' | 'monitor' | 'history' | 'alerts' | 'settings', onChange?: (key: 'home' | 'monitor' | 'history' | 'alerts' | 'settings') => void }} props
  */
 export default function BottomNav({ active = 'home', onChange = () => {} }) {
+  const { dark } = useTheme();
+  const colors = getColors(dark);
   return (
-    <View style={styles.bar}>
+    <View style={[styles.bar, { backgroundColor: colors.navBg, borderTopColor: colors.border }]}>
       {ITEMS.map((item) => {
         const color = item.key === active ? colors.accent : colors.inactive;
         return (
@@ -39,7 +41,6 @@ const styles = StyleSheet.create({
     height: 72,
     paddingTop: 12,
     flexDirection: 'row',
-    backgroundColor: colors.navBg,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#D5E6EF',
   },

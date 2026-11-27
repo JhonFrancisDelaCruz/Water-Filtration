@@ -4,21 +4,21 @@ import Card from '../components/Card';
 import Button from '../components/Button';
 import Icon from '../components/Icon';
 import StatusPill from '../components/StatusPill';
-import SignalBars from '../components/SignalBars';
 import Stepper from '../components/Stepper';
 import { TOP } from '../components/Header';
-import { colors, shadow } from '../constants/theme';
-import { STEPS, connectDevice, scanNetworks, provisionWifi } from '../services/provisioning';
+import { colors, getColors, shadow, useTheme } from '../constants/theme';
+import { STEPS, connectDevice, disconnectDevice, provisionWifi } from '../services/provisioning';
 
-const LEVEL_TEXT = { 4: 'Excellent signal', 3: 'Good signal', 2: 'Fair signal', 1: 'Weak signal' };
 
 function Field({ label, icon, right, focused, ...inputProps }) {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
   return (
     <View>
-      <Text style={styles.label}>{label}</Text>
-      <View style={[styles.field, focused && styles.fieldFocus]}>
-        <Icon name={icon} size={18} color={colors.mutedText} />
-        <TextInput style={styles.input} placeholderTextColor="#94A3B8" autoCapitalize="none" autoCorrect={false} {...inputProps} />
+      <Text style={[styles.label, { color: palette.textStrong }]}>{label}</Text>
+      <View style={[styles.field, focused && styles.fieldFocus, { backgroundColor: palette.card, borderColor: focused ? palette.accent : palette.border }]}>
+        <Icon name={icon} size={18} color={palette.mutedText} />
+        <TextInput style={[styles.input, { color: palette.textStrong }]} placeholderTextColor={palette.mutedText} autoCapitalize="none" autoCorrect={false} {...inputProps} />
         {right}
       </View>
     </View>
@@ -26,6 +26,8 @@ function Field({ label, icon, right, focused, ...inputProps }) {
 }
 
 export default function WifiConfigScreen({ onBack }) {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
   const [deviceConnected, setDeviceConnected] = useState(false);
   const [deviceBusy, setDeviceBusy] = useState(false);
   const [deviceError, setDeviceError] = useState('');
@@ -35,8 +37,6 @@ export default function WifiConfigScreen({ onBack }) {
   const [showPw, setShowPw] = useState(false);
   const [focus, setFocus] = useState(null);
 
-  const [networks, setNetworks] = useState([]);
-  const [scanning, setScanning] = useState(false);
 
   const [phase, setPhase] = useState('form'); // 'form' | 'running' | 'success' | 'failed'
   const [step, setStep] = useState(0);
@@ -49,6 +49,7 @@ export default function WifiConfigScreen({ onBack }) {
     return () => {
       mounted.current = false;
       cancelled.current = true;
+      void disconnectDevice().catch(() => {});
     };
   }, []);
 
@@ -58,21 +59,15 @@ export default function WifiConfigScreen({ onBack }) {
     try {
       await connectDevice();
       if (mounted.current) setDeviceConnected(true);
-    } catch (_e) {
-      if (mounted.current) setDeviceError('Could not find your ESP32-S3. Make sure it is powered on and nearby.');
+    } catch (e) {
+      if (mounted.current) setDeviceError(e?.message || 'Could not find your ESP32-S3. Make sure it is powered on and nearby.');
     } finally {
       if (mounted.current) setDeviceBusy(false);
     }
   };
 
   const handleScan = async () => {
-    setScanning(true);
-    try {
-      const list = await scanNetworks();
-      if (mounted.current) setNetworks(list);
-    } finally {
-      if (mounted.current) setScanning(false);
-    }
+    await handleConnect();
   };
 
   const handleSave = async () => {
@@ -107,16 +102,11 @@ export default function WifiConfigScreen({ onBack }) {
     cancelled.current = true;
   };
 
-  const selectNetwork = (n) => {
-    setSsid(n.ssid);
-    if (!n.secure) setPassword('');
-  };
-
   const canSave = ssid.trim().length > 0;
 
   return (
     <ScrollView
-      style={styles.screen}
+      style={[styles.screen, { backgroundColor: palette.surface }]}
       contentContainerStyle={[styles.content, { paddingTop: TOP + 8 }]}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
@@ -126,13 +116,13 @@ export default function WifiConfigScreen({ onBack }) {
         disabled={phase === 'running'}
         accessibilityRole="button"
         accessibilityLabel="Back to Settings"
-        style={[styles.back, shadow, phase === 'running' && { opacity: 0.4 }]}
+        style={[styles.back, shadow, { backgroundColor: palette.card }, phase === 'running' && { opacity: 0.4 }]}
       >
-        <Icon name="arrowLeft" size={20} color={colors.textStrong} />
+        <Icon name="arrowLeft" size={20} color={palette.textStrong} />
       </Pressable>
       <View>
-        <Text style={styles.title}>Wi-Fi Configuration</Text>
-        <Text style={styles.subtitle}>Connect your ESP32-S3 to a new Wi-Fi network</Text>
+        <Text style={[styles.title, { color: palette.textStrong }]}>Wi-Fi Configuration</Text>
+        <Text style={[styles.subtitle, { color: palette.mutedText }]}>Connect your ESP32-S3 to a new Wi-Fi network</Text>
       </View>
 
       {phase === 'form' && (
@@ -144,7 +134,7 @@ export default function WifiConfigScreen({ onBack }) {
                 <Icon name="bluetooth" size={24} color="#0E7490" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.deviceName}>AquaMonitor ESP32-S3</Text>
+                <Text style={styles.deviceName}>Aquasense ESP32-S3</Text>
                 <Text style={styles.deviceSub}>Bluetooth status</Text>
               </View>
               {deviceConnected ? (
@@ -205,52 +195,14 @@ export default function WifiConfigScreen({ onBack }) {
             />
 
             <Button
-              title={scanning ? 'Scanning…' : 'Scan Wi-Fi Networks'}
+              title="Reconnect to device"
               icon="refresh"
               variant="ghost"
-              disabled={scanning || !deviceConnected}
+              disabled={deviceBusy}
               onPress={handleScan}
               style={{ marginTop: 16 }}
             />
-            {!deviceConnected && (
-              <Text style={styles.hint}>Connect to your ESP32-S3 first to scan for networks.</Text>
-            )}
-
-            {networks.length > 0 && (
-              <>
-                <View style={styles.listHead}>
-                  <Text style={styles.listTitle}>Available networks</Text>
-                  <Text style={styles.listCount}>{networks.length} found</Text>
-                </View>
-                {networks.map((n) => {
-                  const sel = n.ssid === ssid;
-                  return (
-                    <Pressable
-                      key={n.ssid}
-                      onPress={() => selectNetwork(n)}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: sel }}
-                      style={[styles.net, sel && styles.netSel]}
-                    >
-                      <SignalBars level={n.level} />
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.netName, sel && { fontWeight: '600' }]}>{n.ssid}</Text>
-                        <Text style={styles.netSub}>
-                          {LEVEL_TEXT[n.level]}
-                          {n.secure ? '' : ' · Open network'}
-                        </Text>
-                      </View>
-                      {n.secure ? <Icon name="lock" size={16} color={colors.mutedText} /> : null}
-                      {sel ? <Icon name="check" size={18} color={colors.link} strokeWidth={2.4} /> : null}
-                    </Pressable>
-                  );
-                })}
-              </>
-            )}
-
-            <Text style={styles.hint}>
-              {networks.length > 0 ? 'Tap a network to fill in its name. ' : ''}ESP32-S3 supports 2.4 GHz networks only.
-            </Text>
+            <Text style={styles.hint}>Enter the Wi-Fi network name exactly as shown by your router. ESP32-S3 supports 2.4 GHz networks only.</Text>
 
             <Button title="Save & Connect" onPress={handleSave} disabled={!canSave} height={52} style={{ marginTop: 18 }} />
             <Text style={styles.footNote}>Your new Wi-Fi details are sent over Bluetooth. This takes about 20 seconds.</Text>
@@ -293,7 +245,7 @@ export default function WifiConfigScreen({ onBack }) {
                 <Icon name="check" size={44} color={colors.success} strokeWidth={2.4} />
               </View>
               <Text style={styles.okTitle}>Wi-Fi Connected</Text>
-              <Text style={styles.okText}>Your ESP32-S3 is now using the new network and sending readings over Wi-Fi.</Text>
+              <Text style={styles.okText}>Your ESP32-S3 joined the new network and verified HTTPS access. Valid calibrated readings sync over Wi-Fi.</Text>
             </View>
             <View style={styles.sumRow}>
               <Text style={styles.sumLabel}>Connected network</Text>

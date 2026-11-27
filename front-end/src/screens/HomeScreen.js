@@ -4,55 +4,57 @@ import Icon from '../components/Icon';
 import Header from '../components/Header';
 import Badge from '../components/Badge';
 import TurbidityChart from '../components/TurbidityChart';
-import { colors, shadow } from '../constants/theme';
+import { colors, getColors, shadow, useTheme } from '../constants/theme';
+import { useAquasense } from '../services/useAquasense';
+import { formatReading, isBackendConfigured } from '../services/supabase';
 
-// Sample data: the project has a single turbidity sensor.
-const CURRENT_NTU = 2.4;
-const READINGS = [
-  { label: '8 AM', value: 5.1 },
-  { label: '9 AM', value: 4.25 },
-  { label: '10 AM', value: 3.4 },
-  { label: '11 AM', value: 2.55 },
-  { label: '12 AM', value: 1.7 },
-];
+const statusTone = (status) => status === 'Good' ? 'green' : status === 'Warning' ? 'yellow' : status === 'Poor' ? 'red' : 'blue';
 
 function SummaryCard({ icon, label, value, badge, tone }) {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
   return (
-    <View style={[styles.summaryCard, shadow]}>
-      <Icon name={icon} size={18} color={colors.accent} />
-      <Text style={styles.summaryLabel}>{label}</Text>
-      <Text style={styles.summaryValue}>{value}</Text>
+    <View style={[styles.summaryCard, shadow, { backgroundColor: palette.card }]}>
+      <Icon name={icon} size={18} color={palette.accent} />
+      <Text style={[styles.summaryLabel, { color: palette.text }]}>{label}</Text>
+      <Text style={[styles.summaryValue, { color: palette.value }]}>{value}</Text>
       <Badge text={badge} tone={tone} style={styles.smallBadge} />
     </View>
   );
 }
 
 export default function HomeScreen() {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
+  const { device, readings, loading, error } = useAquasense();
+  const latest = readings[0];
+  const chartData = readings.slice(0, 8).reverse().map((r) => ({ label: new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: Number(r.turbidity_value) }));
+  const status = latest?.water_status || 'No data';
   return (
     <ScrollView
-      style={styles.screen}
+      style={[styles.screen, { backgroundColor: palette.background }]}
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
       <Header subtitle="Water Filtration Monitoring" />
 
-      <View style={[styles.mainCard, shadow]}>
-        <Icon name="droplets" size={30} color={colors.accent} strokeWidth={1.8} />
-        <Text style={styles.mainLabel}>Turbidity Reading</Text>
-        <Text style={styles.mainValue}>{CURRENT_NTU} NTU</Text>
-        <Badge text="Normal" tone="green" style={styles.mainBadge} />
+      <View style={[styles.mainCard, shadow, { backgroundColor: palette.mintCard }]}>
+        <Icon name="droplets" size={30} color={palette.accent} strokeWidth={1.8} />
+        <Text style={[styles.mainLabel, { color: palette.text }]}>Latest turbidity reading (raw ADC)</Text>
+        <Text style={[styles.mainValue, { color: palette.value }]}>{latest ? formatReading(latest.turbidity_value) : '--'}</Text>
+        <Badge text={status} tone={statusTone(status)} style={styles.mainBadge} />
       </View>
 
       <View style={styles.row}>
-        <SummaryCard icon="trend" label="Water Quality" value="Clear" badge="Within threshold" tone="green" />
-        <SummaryCard icon="clock" label="Last Reading" value="Now" badge="Within threshold" tone="blue" />
+        <SummaryCard icon="trend" label="Device" value={device?.device_name || 'Aquasense'} badge={device?.is_online ? 'Online' : 'Offline'} tone={device?.is_online ? 'green' : 'red'} />
+        <SummaryCard icon="clock" label="Last Reading" value={latest ? new Date(latest.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : loading ? 'Loading' : 'None'} badge={latest ? new Date(latest.created_at).toLocaleDateString() : 'Awaiting data'} tone="blue" />
       </View>
 
-      <View style={[styles.chartCard, shadow]}>
-        <Text style={styles.chartTitle}>Recent Turbidity Readings</Text>
-        <Text style={styles.chartSub}>Sample data</Text>
+      <View style={[styles.chartCard, shadow, { backgroundColor: palette.card }]}>
+        <Text style={[styles.chartTitle, { color: palette.textStrong }]}>Recent Turbidity Readings</Text>
+        <Text style={[styles.chartSub, { color: palette.mutedText }]}>{error || (!isBackendConfigured ? 'Set app environment to connect' : `${readings.length} latest readings · raw ADC counts`)}</Text>
         <View style={{ marginTop: 10 }}>
-          <TurbidityChart data={READINGS} />
+          {chartData.length > 1 ? <TurbidityChart data={chartData} /> : <Text style={[styles.chartSub, { color: palette.mutedText }]}>Waiting for at least two readings.</Text>}
         </View>
       </View>
     </ScrollView>

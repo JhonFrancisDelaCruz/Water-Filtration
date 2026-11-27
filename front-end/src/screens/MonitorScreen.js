@@ -4,55 +4,58 @@ import Icon from '../components/Icon';
 import Header from '../components/Header';
 import Badge from '../components/Badge';
 import TurbidityChart from '../components/TurbidityChart';
-import { colors, shadow } from '../constants/theme';
-
-const CURRENT_NTU = 2.4;
-const LIVE_READINGS = [
-  { label: '12:00', value: 5.1 },
-  { label: '12:01', value: 4.25 },
-  { label: '12:02', value: 3.4 },
-  { label: '12:03', value: 2.55 },
-  { label: '12:04', value: 1.7 },
-];
+import { colors, getColors, shadow, useTheme } from '../constants/theme';
+import { useAquasense } from '../services/useAquasense';
+import { formatReading, isBackendConfigured } from '../services/supabase';
 
 export default function MonitorScreen() {
+  const { dark } = useTheme();
+  const palette = getColors(dark);
+  const { device, readings, loading, error } = useAquasense(10000);
+  const latest = readings[0];
+  const chartData = readings.slice(0, 12).reverse().map((r) => ({ label: new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: Number(r.turbidity_value) }));
+  const status = latest?.water_status || 'No data';
   return (
     <ScrollView
-      style={styles.screen}
+      style={[styles.screen, { backgroundColor: palette.background }]}
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
       <Header subtitle="Real-time turbidity sensor monitoring" />
 
-      <View style={[styles.mainCard, shadow]}>
-        <Icon name="droplets" size={30} color={colors.accent} strokeWidth={1.8} />
-        <Text style={styles.mainLabel}>Current Turbidity</Text>
-        <Text style={styles.mainValue}>{CURRENT_NTU} NTU</Text>
-        <Badge text="Normal Condition" tone="green" style={styles.mainBadge} />
+      <View style={[styles.mainCard, shadow, { backgroundColor: palette.mintCard }]}>
+        <Icon name="droplets" size={30} color={palette.accent} strokeWidth={1.8} />
+        <Text style={[styles.mainLabel, { color: palette.text }]}>Current turbidity · raw ADC</Text>
+        <Text style={styles.mainValue}>{latest ? formatReading(latest.turbidity_value) : loading ? 'Loading…' : '--'}</Text>
+        <Badge text={status} tone={status === 'Good' ? 'green' : status === 'Poor' ? 'red' : status === 'Warning' ? 'yellow' : 'blue'} style={styles.mainBadge} />
       </View>
 
-      <View style={[styles.card, shadow]}>
+      <View style={[styles.card, shadow, { backgroundColor: palette.card }]}>
         <View style={styles.titleRow}>
           <View>
-            <Text style={styles.cardTitle}>Recent Turbidity Readings</Text>
-            <Text style={styles.cardSub}>Live</Text>
+            <Text style={[styles.cardTitle, { color: palette.textStrong }]}>Recent Turbidity Readings</Text>
+            <Text style={[styles.cardSub, { color: palette.mutedText }]}>{error || (!isBackendConfigured ? 'App backend configuration required' : 'Updates every 10 seconds')}</Text>
           </View>
-          <Badge text="Live" tone="green" style={styles.liveBadge} />
+          <Badge text={device?.is_online ? 'Online' : 'Offline'} tone={device?.is_online ? 'green' : 'red'} style={styles.liveBadge} />
         </View>
         <View style={{ marginTop: 10 }}>
-          <TurbidityChart data={LIVE_READINGS} />
+          {chartData.length > 1 ? <TurbidityChart data={chartData} /> : <Text style={[styles.cardSub, { color: palette.mutedText }]}>Waiting for at least two readings.</Text>}
         </View>
       </View>
 
-      <View style={[styles.card, shadow]}>
-        <Text style={styles.cardTitle}>Sensor Information</Text>
+      <View style={[styles.card, shadow, { backgroundColor: palette.card }]}>
+        <Text style={[styles.cardTitle, { color: palette.textStrong }]}>Sensor Information</Text>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Sensor Type</Text>
-          <Text style={styles.infoValue}>Turbidity Sensor</Text>
+          <Text style={[styles.infoLabel, { color: palette.text }]}>Sensor Type</Text>
+          <Text style={[styles.infoValue, { color: palette.text }]}>Turbidity Sensor</Text>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Connection</Text>
-          <Text style={[styles.infoValue, { color: colors.accent }]}>Connected</Text>
+          <Text style={[styles.infoLabel, { color: palette.text }]}>Connection</Text>
+          <Text style={[styles.infoValue, { color: device?.is_online ? colors.accent : '#DC2626' }]}>{device?.is_online ? 'Online' : 'Offline'}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: palette.text }]}>Last server contact</Text>
+          <Text style={[styles.infoValue, { color: palette.text }]}>{device?.last_seen ? new Date(device.last_seen).toLocaleString() : 'Never'}</Text>
         </View>
       </View>
     </ScrollView>
