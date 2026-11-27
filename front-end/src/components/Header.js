@@ -15,7 +15,7 @@ export default function Header({ subtitle }) {
         <View style={styles.bell}>
           <Icon name="bell" size={22} color="#fff" strokeWidth={2.2} />
         </View>
-        <Text style={styles.title}>AquaMonitor</Text>
+        <Text style={styles.title}>AQUASENSE</Text>
         <Text style={styles.subtitle}>{subtitle}</Text>
       </View>
     </>

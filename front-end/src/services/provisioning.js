@@ -1,13 +1,3 @@
-// Wi-Fi provisioning service for the ESP32-S3 (Bluetooth is used ONLY for this).
-//
-// ⚠️  This file is a SIMULATION so the UI can be built and tested in Expo Go.
-// Every exported function keeps the shape a real Bluetooth (BLE) version needs,
-// so later you only replace the bodies using `react-native-ble-plx` and the UI
-// does not change. Nothing here produces sensor data.
-//
-// Simulated rule for testing the failure screen: a password that is
-// 1–7 characters long is rejected ("wrong password"). Leave it empty or use
-// 8+ characters to see the success flow.
 
 export const STEPS = [
   'Connecting to ESP32 via Bluetooth',

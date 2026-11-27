@@ -1,8 +1,8 @@
 export const colors = {
-  primary: '#36A9F4',
+  primary: '#006cb4',
   accent: '#0A8CC4',
   value: '#0B87C9',
-  background: '#EEF0F2',
+  background: '#eeefef',
   surface: '#EEF4FA',
   card: '#FFFFFF',
   mintCard: '#E3F7F0',
