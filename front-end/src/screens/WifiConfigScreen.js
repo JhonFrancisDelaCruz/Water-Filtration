@@ -205,7 +205,7 @@ export default function WifiConfigScreen({ onBack }) {
             <Text style={styles.hint}>Enter the Wi-Fi network name exactly as shown by your router. ESP32-S3 supports 2.4 GHz networks only.</Text>
 
             <Button title="Save & Connect" onPress={handleSave} disabled={!canSave} height={52} style={{ marginTop: 18 }} />
-            <Text style={styles.footNote}>Your new Wi-Fi details are sent over Bluetooth. This takes about 20 seconds.</Text>
+            <Text style={styles.footNote}>Your new Wi-Fi details are sent over Bluetooth and verified with a secure internet connection. This can take up to 45 seconds.</Text>
           </Card>
         </>
       )}
@@ -281,7 +281,7 @@ export default function WifiConfigScreen({ onBack }) {
               </View>
             </View>
             <View style={{ marginTop: 20 }}>
-              <Stepper steps={STEPS} current={Math.min(step, 2)} status="failed" failText="Failed after 20 seconds" />
+              <Stepper steps={STEPS} current={Math.min(step, 2)} status="failed" failText="Setup failed" />
             </View>
           </Card>
           <Card title="Things to check" style={{ paddingBottom: 14 }}>

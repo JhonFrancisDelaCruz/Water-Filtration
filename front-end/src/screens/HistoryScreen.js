@@ -35,7 +35,8 @@ export default function HistoryScreen() {
   const values = records.map((r) => Number(r.turbidity_value)).filter(Number.isFinite);
   const average = values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
   const highest = values.length ? Math.max(...values) : null;
-  const graph = ascending.slice(-24).map((r) => ({ label: new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: Number(r.turbidity_value) }));
+  const graph = ascending.filter((_, index) => index % Math.max(1, Math.ceil(ascending.length / 24)) === 0).slice(-24).map((r) => ({ label: new Date(r.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }), value: Number(r.turbidity_value) }));
+  const visibleRecords = records.slice(0, 500);
 
   return (
     <ScrollView style={[styles.screen, { backgroundColor: palette.background }]} contentContainerStyle={[styles.content, { paddingTop: TOP + 28 }]} showsVerticalScrollIndicator={false}>
@@ -56,7 +57,8 @@ export default function HistoryScreen() {
       </View>
       <View style={[styles.card, shadow, { backgroundColor: palette.card }]}>
         <Text style={[styles.cardTitle, { color: palette.textStrong }]}>Recorded readings</Text>
-        {records.map((r) => <View key={r.id} style={styles.tr}><View style={{ flex: 1 }}><Text style={[styles.td, { color: palette.text }]}>{new Date(r.created_at).toLocaleString()}</Text></View><Text style={[styles.td, { color: palette.text }]}>{Number(r.turbidity_value).toFixed(0)} ADC</Text><Badge text={r.water_status} tone={r.water_status === 'Good' ? 'green' : r.water_status === 'Poor' ? 'red' : r.water_status === 'Warning' ? 'yellow' : 'blue'} /></View>)}
+        {visibleRecords.map((r) => <View key={r.id} style={styles.tr}><View style={{ flex: 1 }}><Text style={[styles.td, { color: palette.text }]}>{new Date(r.created_at).toLocaleString()}</Text></View><Text style={[styles.td, { color: palette.text }]}>{Number(r.turbidity_value).toFixed(0)} ADC</Text><Badge text={r.water_status} tone={r.water_status === 'Good' ? 'green' : r.water_status === 'Poor' ? 'red' : r.water_status === 'Warning' ? 'yellow' : 'blue'} /></View>)}
+        {records.length > visibleRecords.length && <Text style={[styles.empty, { color: palette.mutedText }]}>Showing the latest {visibleRecords.length} readings. Statistics and trend use all {records.length} readings in this period.</Text>}
         {!records.length && !loading && <Text style={[styles.empty, { color: palette.mutedText }]}>No records to show.</Text>}
       </View>
     </ScrollView>

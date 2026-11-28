@@ -13,11 +13,23 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
 function jsonResponse(data: object, status = 200) {
   return Response.json(data, {
     status,
     headers: corsHeaders,
   });
+}
+
+function equalHexConstantTime(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
 }
 
 async function hashSecret(secret: string): Promise<string> {
@@ -27,15 +39,6 @@ async function hashSecret(secret: string): Promise<string> {
   return Array.from(new Uint8Array(hash))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-}
-
-function equalHexConstantTime(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let difference = 0;
-  for (let index = 0; index < a.length; index++) {
-    difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
-  }
-  return difference === 0;
 }
 
 Deno.serve(async (req) => {
@@ -52,7 +55,7 @@ Deno.serve(async (req) => {
     const deviceId = req.headers.get("x-device-id")?.trim();
     const deviceSecret = req.headers.get("x-device-secret")?.trim();
 
-    if (!deviceId || !deviceSecret) {
+    if (!deviceId || !deviceSecret || !UUID_V4_RE.test(deviceId)) {
       return jsonResponse({
         error: "Missing device credentials",
       }, 401);
@@ -118,34 +121,29 @@ Deno.serve(async (req) => {
       typeof waterStatus !== "string" ||
       !["Good", "Warning", "Poor"].includes(waterStatus) ||
       typeof readingId !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(readingId) ||
-      (recordedAt !== undefined && (typeof recordedAt !== "string" || !Number.isFinite(Date.parse(recordedAt))))
+      !UUID_V4_RE.test(readingId) ||
+      (recordedAt !== undefined && (
+        typeof recordedAt !== "string" ||
+        !ISO_TIMESTAMP_RE.test(recordedAt) ||
+        !Number.isFinite(Date.parse(recordedAt))
+      ))
     ) {
       return jsonResponse({
         error: "Invalid sensor data",
       }, 400);
     }
 
-    const { error: updateError } = await supabase
-      .from("devices")
-      .update({ is_online: true, last_seen: new Date().toISOString() })
-      .eq("id", deviceId);
-    if (updateError) {
-      console.error("DEVICE UPDATE ERROR:", updateError);
-      return jsonResponse({ error: "Unable to update device status" }, 500);
-    }
-
-    // 6. Save sensor reading. The existing UUID primary key is the replay
-    // idempotency key, so a device can safely retry after a lost response.
+    // 6. Save sensor reading. device_reading_id is a UUID idempotency key;
+    // the table keeps its generated bigint primary key.
     const { data: inserted, error: insertError } = await supabase
       .from("sensor_readings")
       .upsert({
-        id: readingId,
+        device_reading_id: readingId,
         device_id: deviceId,
         turbidity_value: turbidityValue,
         water_status: waterStatus,
         ...(recordedAt ? { created_at: recordedAt } : {}),
-      }, { onConflict: "id", ignoreDuplicates: true })
+      }, { onConflict: "device_id,device_reading_id", ignoreDuplicates: true })
       .select("id")
       .maybeSingle();
 
@@ -159,37 +157,70 @@ Deno.serve(async (req) => {
     const isReplay = !inserted;
     if (isReplay) console.info("Acknowledging replayed reading", readingId);
 
-    // 7. Alert only when entering Warning/Poor, rather than making an alert for
-    // every periodic sample that remains in the same unhealthy state.
+    const { data: currentReading, error: currentReadingError } = await supabase
+      .from("sensor_readings")
+      .select("created_at")
+      .eq("device_id", deviceId)
+      .eq("device_reading_id", readingId)
+      .maybeSingle();
+
+    if (currentReadingError || !currentReading) {
+      console.error("SAVED READING LOOKUP ERROR:", currentReadingError);
+      return jsonResponse({ error: "Reading saved; its stored timestamp could not be checked" }, 500);
+    }
+
+    // 7. Update device status
+    const { error: updateError } = await supabase
+      .from("devices")
+      .update({
+        is_online: true,
+        last_seen: new Date().toISOString(),
+      })
+      .eq("id", deviceId);
+
+    if (updateError) {
+      console.error("DEVICE UPDATE ERROR:", updateError);
+      return jsonResponse({
+        error: "Reading saved, but device status update failed",
+      }, 500);
+    }
+
+    // 8. Create an alert once per transition into Warning/Poor. The alert's
+    // device_reading_id is also unique, so a retry can safely finish this step.
     if (waterStatus !== "Good") {
-      const { data: previous } = await supabase
+      const { data: previous, error: previousError } = await supabase
         .from("sensor_readings")
         .select("water_status")
         .eq("device_id", deviceId)
-        .neq("id", readingId)
+        .lt("created_at", currentReading.created_at)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
 
+      if (previousError) {
+        console.error("PREVIOUS READING LOOKUP ERROR:", previousError);
+        return jsonResponse({ error: "Reading saved; alert state could not be checked" }, 500);
+      }
+
       if (!previous || previous.water_status !== waterStatus) {
-        const severity = waterStatus.toLowerCase();
         const { error: alertError } = await supabase.from("alerts").upsert({
-          id: readingId,
+          device_reading_id: readingId,
           device_id: deviceId,
           message: waterStatus === "Poor"
             ? "Turbidity reached the poor water quality range. Check the water and filter."
             : "Turbidity reached the warning range. Monitor the filter and water quality.",
-          severity,
+          severity: waterStatus.toLowerCase(),
           is_read: false,
-        }, { onConflict: "id", ignoreDuplicates: true });
+        }, { onConflict: "device_id,device_reading_id", ignoreDuplicates: true });
+
         if (alertError) {
-          console.error("ALERT INSERT ERROR:", alertError);
+          console.error("ALERT UPSERT ERROR:", alertError);
           return jsonResponse({ error: "Reading saved; alert will be retried" }, 500);
         }
       }
     }
 
-    // 8. Return success
+    // 9. Return success
     return jsonResponse({
       success: true,
       duplicate: isReplay,

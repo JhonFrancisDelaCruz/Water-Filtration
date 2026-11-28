@@ -29,12 +29,22 @@ export async function getDeviceSnapshot() {
 
 export async function getReadings({ from, to } = {}) {
   if (!supabase) throw new Error('Set the Expo public Supabase URL, anon key, and device ID.');
-  let query = supabase.from('sensor_readings').select('id, device_id, turbidity_value, water_status, created_at').eq('device_id', deviceId).order('created_at', { ascending: false }).limit(500);
-  if (from) query = query.gte('created_at', from);
-  if (to) query = query.lte('created_at', to);
-  const { data, error } = await query;
-  if (error) throw error;
-  return data || [];
+  const pageSize = 1000;
+  const readings = [];
+  for (let offset = 0; ; offset += pageSize) {
+    let query = supabase.from('sensor_readings')
+      .select('id, device_id, turbidity_value, water_status, created_at')
+      .eq('device_id', deviceId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + pageSize - 1);
+    if (from) query = query.gte('created_at', from);
+    if (to) query = query.lte('created_at', to);
+    const { data, error } = await query;
+    if (error) throw error;
+    readings.push(...(data || []));
+    if (!data || data.length < pageSize) return readings;
+  }
 }
 
 export async function getAlerts() {

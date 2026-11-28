@@ -1,4 +1,3 @@
-
 // Aquasense - ESP32-S3 turbidity monitor -> Supabase
 // Sensor values are RAW ADC counts (0-4095), NOT NTU.
 
@@ -11,17 +10,15 @@
 #include <time.h>
 #include <Preferences.h>
 #include <LittleFS.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
-#include <BLESecurity.h>
+#include <BLE.h>
 #include <esp_system.h>
 
 #include "config.h"
 #include "secrets.h"
 
 // Root CA certificate used to verify the Supabase server.
+// IMPORTANT: paste your ORIGINAL, unmodified PEM between the markers below.
+// (The one in the pasted message had broken line lengths, so it was not copied.)
 static const char SUPABASE_ROOT_CA[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -65,17 +62,22 @@ const int     SENSOR_PIN = TURBIDITY_ADC_PIN;
 const int     SDA_PIN    = OLED_SDA_PIN;
 const int     SCL_PIN    = OLED_SCL_PIN;
 const uint8_t OLED_ADDR  = OLED_I2C_ADDRESS;
+const int     RED_PIN    = RGB_RED_PIN;
+const int     GREEN_PIN  = RGB_GREEN_PIN;
+const int     BLUE_PIN   = RGB_BLUE_PIN;
+
+// Set true if your RGB LED is common-anode (LOW = on)
+const bool RGB_COMMON_ANODE = false;
 
 // ---- Sampling ----
 const int           NUM_SAMPLES      = 30;   // samples per averaged reading
 const int           TRIM_COUNT       = 3;    // lowest/highest samples discarded
 const unsigned long SAMPLE_PERIOD_MS = 20;   // time between samples
-const int           MAX_SPREAD       = 150;  // above this = "Unstable" (tune for your setup)
+const int           MAX_SPREAD       = 150;  // above this = "Unstable"
 const int           ADC_RAIL_LOW     = 10;   // at/below = sensor probably disconnected
 const int           ADC_RAIL_HIGH    = 4085; // at/above = sensor probably disconnected
 
 // ---- Calibration / classification ----
-// Fill these from YOUR Step 2 measurements, then set CALIBRATED = true.
 const bool CALIBRATED            = TURBIDITY_CALIBRATED;
 const bool ADC_HIGHER_IS_CLEARER = ADC_DIRECTION_HIGHER_CLEARER;
 const int  GOOD_LIMIT            = ADC_GOOD_LIMIT;
@@ -84,17 +86,20 @@ const int  POOR_LIMIT            = ADC_POOR_LIMIT;
 // Lower-is-clearer : adc <= GOOD_LIMIT -> Good, adc <= POOR_LIMIT -> Warning, else Poor
 
 // ---- Timing ----
-const unsigned long SEND_INTERVAL_MS = 60000;  // one reading per minute
-const unsigned long RETRY_DELAY_MS   = 15000;
-const unsigned long WIFI_RETRY_MS    = 10000;
-const unsigned long OLED_PERIOD_MS   = 500;
-const int           HTTP_TIMEOUT_MS  = 5000;
+const unsigned long SEND_INTERVAL_MS   = 60000;  // one reading per minute
+const unsigned long RETRY_DELAY_MS     = 15000;
+const unsigned long WIFI_RETRY_MS      = 10000;
+const unsigned long OLED_PERIOD_MS     = 500;
+const unsigned long PROVISION_TIMEOUT_MS = 45000;
+const unsigned long PROVISION_TLS_RETRY_MS = 2500;
+const int           HTTP_TIMEOUT_MS    = 5000;
 
 // ===================== STATE =====================
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 Preferences prefs;
-BLECharacteristic* bleStatus = nullptr;
+BLECharacteristic bleStatus;
+bool bleStatusReady = false;
 String pendingSsid, pendingPassword;
 volatile bool wifiConfigRequested = false;
 bool provisioningActive = false;
@@ -116,7 +121,6 @@ const char* invalidWhy   = "Starting";
 
 bool wasConnected = false;
 bool timeSyncStarted = false;
-unsigned long lastWifiCheckMs = 0;
 unsigned long lastWifiAttemptMs = 0;
 
 bool firstSendDue = true;
@@ -137,10 +141,13 @@ void readTurbiditySensor();
 void filterSensorReadings();
 const char* classifyWaterQuality(int adc);
 void updateOLED();
+void setRgbColor(uint8_t r, uint8_t g, uint8_t b);
+void updateRgbStatus();
 void handleSendSchedule();
 bool sendSensorDataToSupabase(const String& payload);
 bool handleSupabaseResponse(int code, const String& body);
 bool isTimeSynced();
+bool getSupabaseHost(char* host, size_t hostSize);
 String makeReadingId();
 bool enqueueReading();
 void syncReadingQueue();
@@ -152,12 +159,20 @@ void setup() {
   delay(1000);
   Serial.println("\n=== Aquasense ESP32-S3 starting ===");
 
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  setRgbColor(0, 0, 255); // Blue on startup
+
   prefs.begin("aquasense", false);
   savedSsid = prefs.getString("ssid", "");
   savedPassword = prefs.getString("password", "");
+
+  // Mount without formatting so a mount problem cannot erase queued readings.
   storageOk = LittleFS.begin(false);
-  if (!storageOk) Serial.println("[QUEUE] LittleFS mount failed; not formatting flash to avoid erasing data");
+  if (!storageOk) Serial.println("[QUEUE] LittleFS mount failed");
   else if (!LittleFS.exists("/queue")) LittleFS.mkdir("/queue");
+
   startBleProvisioning();
 
   analogReadResolution(12);
@@ -190,67 +205,153 @@ void loop() {
   handleSendSchedule();
   syncReadingQueue();
   updateOLED();
+  updateRgbStatus();
   delay(1);
 }
 
-// ===================== WI-FI =====================
+// ===================== WI-FI & BLE (CORE 4.0) =====================
 
-class WifiFieldCallbacks : public BLECharacteristicCallbacks {
-  bool isSsid;
-public:
-  explicit WifiFieldCallbacks(bool ssid) : isSsid(ssid) {}
-  void onWrite(BLECharacteristic* characteristic) override {
-    String value = characteristic->getValue().c_str();
-    if (isSsid) pendingSsid = value.substring(0, 32);
-    else pendingPassword = value.substring(0, 63);
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
+  lastWifiAttemptMs = millis();
+  Serial.println("[WIFI] Connecting to saved network");
+}
+
+void checkWiFiConnection() {
+  const unsigned long now = millis();
+  const bool connected = (WiFi.status() == WL_CONNECTED);
+
+  if (connected && !wasConnected) {
+    wasConnected = true;
+    Serial.printf("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
+    if (!timeSyncStarted) {
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+      timeSyncStarted = true;
+      Serial.println("[TIME] NTP sync started");
+    }
+  } else if (!connected && wasConnected) {
+    wasConnected = false;
+    Serial.println("[WIFI] Disconnected");
   }
-};
 
-class WifiCommandCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* characteristic) override {
-    if (String(characteristic->getValue().c_str()) == "CONNECT") wifiConfigRequested = true;
+  // Retry in the background (but never while BLE provisioning is mid-attempt)
+  if (!connected && !provisioningActive && savedSsid.length() &&
+      now - lastWifiAttemptMs >= WIFI_RETRY_MS) {
+    Serial.println("[WIFI] Retrying connection");
+    WiFi.disconnect(false, false);
+    connectWiFi();
   }
-};
+}
 
-class WifiServerCallbacks : public BLEServerCallbacks {
-  void onDisconnect(BLEServer*) override {
-    BLEDevice::startAdvertising();
-    Serial.println("[BLE] Client disconnected; advertising resumed");
-  }
-};
+bool isTimeSynced() {
+  return time(nullptr) > 1700000000;  // after Nov 2023 = NTP has set the clock
+}
 
-void startBleProvisioning() {
-  BLEDevice::init(AQUASENSE_BLE_NAME);
-  BLESecurity* security = new BLESecurity();
-  security->setAuthenticationMode(true, false, true); // bonded LE Secure Connections; encrypted GATT writes
-  BLEServer* server = BLEDevice::createServer();
-  server->setCallbacks(new WifiServerCallbacks());
-  BLEService* service = server->createService(AQUASENSE_BLE_SERVICE);
-  BLECharacteristic* ssid = service->createCharacteristic(AQUASENSE_BLE_SSID_CHAR, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_ENC);
-  BLECharacteristic* password = service->createCharacteristic(AQUASENSE_BLE_PASSWORD_CHAR, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_ENC);
-  BLECharacteristic* command = service->createCharacteristic(AQUASENSE_BLE_COMMAND_CHAR, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_ENC);
-  bleStatus = service->createCharacteristic(AQUASENSE_BLE_STATUS_CHAR, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  bleStatus->addDescriptor(new BLE2902());
-  ssid->setCallbacks(new WifiFieldCallbacks(true));
-  password->setCallbacks(new WifiFieldCallbacks(false));
-  command->setCallbacks(new WifiCommandCallbacks());
-  bleStatus->setValue("READY");
-  service->start();
-  BLEAdvertising* advertising = BLEDevice::getAdvertising();
-  advertising->addServiceUUID(AQUASENSE_BLE_SERVICE);
-  advertising->setScanResponse(true);
-  BLEDevice::startAdvertising();
-  Serial.printf("[BLE] Advertising as %s for Wi-Fi setup\n", AQUASENSE_BLE_NAME);
+bool getSupabaseHost(char* host, size_t hostSize) {
+  const char* scheme = strstr(SUPABASE_FUNCTION_URL, "://");
+  if (!scheme || hostSize == 0) return false;
+
+  const char* start = scheme + 3;
+  const char* end = strchr(start, '/');
+  const size_t length = end ? static_cast<size_t>(end - start) : strlen(start);
+  if (length == 0 || length >= hostSize) return false;
+
+  memcpy(host, start, length);
+  host[length] = '\0';
+  return true;
 }
 
 void notifyBleStatus(const String& message) {
-  if (!bleStatus) return;
-  bleStatus->setValue(message.c_str());
-  bleStatus->notify();
+  if (!bleStatusReady) return;
+  bleStatus.setValue(message.c_str());
+  bleStatus.notify();
+}
+
+void startBleProvisioning() {
+  BTStatus bleInit = BLE.begin(AQUASENSE_BLE_NAME);
+  if (!bleInit) {
+    Serial.printf("[BLE] Initialization failed: %s\n", bleInit.toString());
+    return;
+  }
+
+  BLESecurity security = BLE.getSecurity();
+  if (!security) {
+    Serial.println("[BLE] Security manager unavailable");
+    return;
+  }
+  security.setAuthenticationMode(true, false, true); // bonded LE Secure Connections
+
+  BLEServer server = BLE.createServer();
+  if (!server) {
+    Serial.println("[BLE] Could not create GATT server");
+    return;
+  }
+
+  BLEService service = server.createService(AQUASENSE_BLE_SERVICE);
+  if (!service) {
+    Serial.println("[BLE] Could not create GATT service");
+    return;
+  }
+
+  BLECharacteristic ssid = service.createCharacteristic(
+    AQUASENSE_BLE_SSID_CHAR,
+    BLEProperty::Write,
+    BLEPermission::WriteEncrypted
+  );
+  ssid.onWrite([](BLECharacteristic& chr, const BLEConnInfo& conn) {
+    pendingSsid = chr.getStringValue().substring(0, 32);
+  });
+
+  BLECharacteristic password = service.createCharacteristic(
+    AQUASENSE_BLE_PASSWORD_CHAR,
+    BLEProperty::Write,
+    BLEPermission::WriteEncrypted
+  );
+  password.onWrite([](BLECharacteristic& chr, const BLEConnInfo& conn) {
+    pendingPassword = chr.getStringValue().substring(0, 63);
+  });
+
+  BLECharacteristic command = service.createCharacteristic(
+    AQUASENSE_BLE_COMMAND_CHAR,
+    BLEProperty::Write,
+    BLEPermission::WriteEncrypted
+  );
+  command.onWrite([](BLECharacteristic& chr, const BLEConnInfo& conn) {
+    if (chr.getStringValue() == "CONNECT") wifiConfigRequested = true;
+  });
+
+  bleStatus = service.createCharacteristic(
+    AQUASENSE_BLE_STATUS_CHAR,
+    BLEProperty::Read | BLEProperty::Notify,
+    BLEPermission::ReadOpen
+  );
+  bleStatus.setValue("READY");
+  bleStatusReady = true;
+
+  // Core 4.0 BLE registers all services when the server starts.
+  if (!server.start()) {
+    bleStatusReady = false;
+    Serial.println("[BLE] Could not start GATT server");
+    return;
+  }
+
+  BLEAdvertising advertising = BLE.getAdvertising();
+  advertising.addServiceUUID(AQUASENSE_BLE_SERVICE);
+  advertising.setScanResponse(true);
+  if (!BLE.startAdvertising()) {
+    Serial.println("[BLE] Could not start advertising");
+    return;
+  }
+
+  Serial.printf("[BLE] Advertising as %s for Wi-Fi setup\n", AQUASENSE_BLE_NAME);
 }
 
 void serviceBleProvisioning() {
   const unsigned long now = millis();
+
+  // 1) Start a new provisioning attempt
   if (wifiConfigRequested && !provisioningActive) {
     wifiConfigRequested = false;
     if (!pendingSsid.length() || pendingPassword.length() > 63) {
@@ -262,81 +363,76 @@ void serviceBleProvisioning() {
     WiFi.begin(pendingSsid.c_str(), pendingPassword.c_str());
     provisioningActive = true;
     provisioningStartedMs = now;
+    lastProvisionTlsCheckMs = 0;
     notifyBleStatus("CONNECTING");
-    Serial.printf("[BLE] Joining Wi-Fi SSID '%s'\n", pendingSsid.c_str());
+    Serial.printf("[BLE] Provisioning Wi-Fi: %s\n", pendingSsid.c_str());
+    return;
   }
+
+  // 2) Watch the attempt
   if (!provisioningActive) return;
-  if (WiFi.status() == WL_CONNECTED && isTimeSynced() && now - lastProvisionTlsCheckMs >= 3000) {
-    lastProvisionTlsCheckMs = now;
-    WiFiClientSecure tls;
-    tls.setCACert(SUPABASE_ROOT_CA);
-    tls.setTimeout(5);
-    const bool tlsOk = tls.connect("ljpfhypcsdvodiwuxkmy.supabase.co", 443);
-    tls.stop();
-    if (tlsOk) {
-      savedSsid = pendingSsid;
-      savedPassword = pendingPassword;
-      prefs.putString("ssid", savedSsid);
-      prefs.putString("password", savedPassword);
-      if (!timeSyncStarted) {
-        configTime(0, 0, "pool.ntp.org", "time.google.com");
-        timeSyncStarted = true;
-      }
-      notifyBleStatus("OK");
-      Serial.printf("[BLE] Wi-Fi and verified TLS ready. IP: %s\n", WiFi.localIP().toString().c_str());
-      provisioningActive = false;
-      wasConnected = true;
-      return;
-    }
-  }
-  if (now - provisioningStartedMs >= 60000) {
+
+  if (now - provisioningStartedMs > PROVISION_TIMEOUT_MS) {
+    WiFi.disconnect(false, false);
     provisioningActive = false;
-    notifyBleStatus("FAIL:WIFI");
-    Serial.println("[BLE] Wi-Fi join/TLS check failed; keeping previously stored credentials");
-    WiFi.disconnect();
-    if (savedSsid.length()) WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
+    pendingPassword = "";
+    notifyBleStatus("FAIL:WIFI_OR_INTERNET");
+    Serial.println("[BLE] Provisioning failed (timeout)");
+    if (savedSsid.length()) connectWiFi();  // fall back to the old network
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED || !isTimeSynced() ||
+      now - lastProvisionTlsCheckMs < PROVISION_TLS_RETRY_MS) return;
+
+  lastProvisionTlsCheckMs = now;
+  char supabaseHost[128];
+  if (!getSupabaseHost(supabaseHost, sizeof(supabaseHost))) {
+    provisioningActive = false;
+    pendingPassword = "";
+    notifyBleStatus("FAIL:SERVER_CONFIG");
+    Serial.println("[BLE] Supabase function URL is invalid");
+    if (savedSsid.length()) connectWiFi();
+    return;
+  }
+
+  WiFiClientSecure tls;
+  tls.setCACert(SUPABASE_ROOT_CA);
+  tls.setTimeout(5000);
+  const bool tlsOk = tls.connect(supabaseHost, 443);
+  tls.stop();
+  if (!tlsOk) {
+    Serial.println("[BLE] Wi-Fi is up, but verified HTTPS is not reachable yet");
+  } else {
+    savedSsid = pendingSsid;
+    savedPassword = pendingPassword;
+    prefs.putString("ssid", savedSsid);
+    prefs.putString("password", savedPassword);
+    pendingPassword = "";            // don't keep the password around in RAM
+    provisioningActive = false;
+    wasConnected = false;            // lets checkWiFiConnection() start NTP
+    notifyBleStatus("OK");
+    Serial.println("[BLE] Wi-Fi and verified HTTPS provisioned and saved");
   }
 }
 
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
-  lastWifiAttemptMs = millis();
-  Serial.printf("[WIFI] Connecting to \"%s\"...\n", savedSsid.c_str());
+// ===================== RGB LED =====================
+
+void setRgbColor(uint8_t r, uint8_t g, uint8_t b) {
+  // r/g/b are treated as on/off (0 = off, anything else = on)
+  const bool on = !RGB_COMMON_ANODE;
+  digitalWrite(RED_PIN,   r ? on : !on);
+  digitalWrite(GREEN_PIN, g ? on : !on);
+  digitalWrite(BLUE_PIN,  b ? on : !on);
 }
 
-void checkWiFiConnection() {
-  unsigned long now = millis();
-  if (now - lastWifiCheckMs < 1000) return;
-  lastWifiCheckMs = now;
-
-  bool connected = (WiFi.status() == WL_CONNECTED);
-
-  if (connected && !wasConnected) {
-    Serial.printf("[WIFI] Connected. IP: %s, RSSI: %d dBm\n",
-                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    if (!timeSyncStarted) {
-      configTime(0, 0, "pool.ntp.org", "time.google.com");
-      timeSyncStarted = true;
-      Serial.println("[TIME] NTP sync started");
-    }
-  }
-  if (!connected && wasConnected) {
-    Serial.println("[WIFI] Connection lost");
-  }
-  wasConnected = connected;
-
-  if (!connected && now - lastWifiAttemptMs >= WIFI_RETRY_MS) {
-    Serial.println("[WIFI] Reconnecting...");
-    WiFi.disconnect();
-    if (savedSsid.length()) WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
-    lastWifiAttemptMs = now;
-  }
-}
-
-bool isTimeSynced() {
-  return time(nullptr) > 1700000000;  // any date after Nov 2023 means NTP worked
+void updateRgbStatus() {
+  if (!CALIBRATED)               { setRgbColor(255, 0, 255); return; } // purple: calibrate
+  if (!latestValid)              { setRgbColor(0, 0, 255);   return; } // blue: invalid/starting
+  const char* s = classifyWaterQuality(latestAdc);
+  if (!strcmp(s, "Good"))        setRgbColor(0, 255, 0);               // green
+  else if (!strcmp(s, "Warning")) setRgbColor(255, 255, 0);            // yellow
+  else                           setRgbColor(255, 0, 0);               // red
 }
 
 // ===================== SENSOR =====================
@@ -562,7 +658,7 @@ bool sendSensorDataToSupabase(const String& payload) {
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
 
- if (!http.begin(client, SUPABASE_FUNCTION_URL)) {
+  if (!http.begin(client, SUPABASE_FUNCTION_URL)) {
     Serial.println("[SUPABASE] http.begin failed");
     cloudMsg = "Begin failed";
     return false;
@@ -571,8 +667,6 @@ bool sendSensorDataToSupabase(const String& payload) {
   http.addHeader("apikey", SUPABASE_PUBLISHABLE_KEY);
   http.addHeader("x-device-id", AQUASENSE_DEVICE_ID);
   http.addHeader("x-device-secret", AQUASENSE_DEVICE_SECRET);
-
-  Serial.printf("[SUPABASE] POST: %s\n", payload.c_str());
 
   int code = http.POST((uint8_t*)payload.c_str(), payload.length());
   String body = (code > 0) ? http.getString() : http.errorToString(code);

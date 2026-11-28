@@ -35,7 +35,9 @@ create policy aquasense_app_alerts_mark_read on public.alerts
 -- device_key_hash must never be selectable by the mobile/anon role.
 revoke select on public.devices from anon, public;
 grant select (id, device_name, is_online, last_seen, created_at) on public.devices to anon;
-grant select on public.sensor_readings, public.alerts to anon;
+revoke select on public.sensor_readings, public.alerts from anon, public;
+grant select (id, device_id, turbidity_value, water_status, created_at) on public.sensor_readings to anon;
+grant select (id, device_id, message, severity, is_read, created_at) on public.alerts to anon;
 revoke insert, update, delete on public.devices, public.sensor_readings, public.alerts from anon, public;
 grant update (is_read) on public.alerts to anon;
 
